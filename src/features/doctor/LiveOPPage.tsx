@@ -381,6 +381,18 @@ export function LiveOPPage() {
             rows={6}
             className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-700"
           />
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                void handleApproveAndSave();
+              }}
+              disabled={consultation.processStatus !== "completed" && consultation.crmSaveStatus !== "saved"}
+              className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white"
+            >
+              {consultation.crmSaveStatus === "saved" ? "Saved to CRM" : "Save to CRM"}
+            </button>
+          </div>
         </Card>
       </div>
     </AppShell>
