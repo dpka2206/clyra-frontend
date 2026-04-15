@@ -1,6 +1,6 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
-import { patients } from "../../lib/mockData.ts";
+import { patients, type PatientRecord } from "../../lib/mockData.ts";
 
 type PatientSessionState = {
   patients: typeof patients;
@@ -20,6 +20,24 @@ const patientSessionSlice = createSlice({
   reducers: {
     selectPatient(state, action: PayloadAction<string>) {
       state.selectedPatientId = action.payload;
+      state.selectedVisitId = null;
+    },
+    hydratePatientWorkspace(
+      state,
+      action: PayloadAction<{
+        patients: PatientRecord[];
+        selectedPatientId?: string;
+      }>,
+    ) {
+      state.patients = action.payload.patients;
+      const nextSelectedPatientId =
+        action.payload.selectedPatientId ?? action.payload.patients[0]?.id ?? state.selectedPatientId;
+      state.selectedPatientId = nextSelectedPatientId;
+      state.selectedVisitId = null;
+    },
+    addPatientRecord(state, action: PayloadAction<PatientRecord>) {
+      state.patients.unshift(action.payload);
+      state.selectedPatientId = action.payload.id;
       state.selectedVisitId = null;
     },
     openVisitModal(state, action: PayloadAction<string>) {
@@ -45,6 +63,12 @@ const patientSessionSlice = createSlice({
   },
 });
 
-export const { selectPatient, openVisitModal, closeVisitModal, updateFourKeySummary } =
-  patientSessionSlice.actions;
+export const {
+  selectPatient,
+  hydratePatientWorkspace,
+  addPatientRecord,
+  openVisitModal,
+  closeVisitModal,
+  updateFourKeySummary,
+} = patientSessionSlice.actions;
 export const patientSessionReducer = patientSessionSlice.reducer;

@@ -28,7 +28,7 @@ export function PrescriptionEditor({ prescriptions, onChange, onAdd }: Prescript
       </div>
       <div className="space-y-4">
         {prescriptions.map((item, index) => (
-          <div key={`${item.medicineName}-${index}`} className="grid gap-3 rounded-2xl border border-slate-200 p-4 md:grid-cols-4">
+          <div key={index} className="grid gap-3 rounded-2xl border border-slate-200 p-4 md:grid-cols-4">
             {(["medicineName", "dosage", "frequency", "timing"] as const).map((field) => (
               <label key={field} className="text-sm text-slate-500">
                 {field}

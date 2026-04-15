@@ -12,6 +12,7 @@ type DoctorState = {
   profile: typeof doctorProfile;
   appointments: AppointmentItem[];
   dateFilter: DateFilter;
+  loadedFromServer: boolean;
 };
 
 const initialState: DoctorState = {
@@ -22,6 +23,7 @@ const initialState: DoctorState = {
     startDate: "2026-04-09",
     endDate: "2026-04-09",
   },
+  loadedFromServer: false,
 };
 
 const doctorSlice = createSlice({
@@ -41,6 +43,26 @@ const doctorSlice = createSlice({
     setDateFilter(state, action: PayloadAction<DateFilter>) {
       state.dateFilter = action.payload;
     },
+    hydrateDoctorWorkspace(
+      state,
+      action: PayloadAction<{
+        profile: typeof doctorProfile;
+        appointments: AppointmentItem[];
+        date: string;
+      }>,
+    ) {
+      state.profile = action.payload.profile;
+      state.appointments = action.payload.appointments;
+      state.dateFilter = {
+        preset: "Today",
+        startDate: action.payload.date,
+        endDate: action.payload.date,
+      };
+      state.loadedFromServer = true;
+    },
+    addAppointment(state, action: PayloadAction<AppointmentItem>) {
+      state.appointments.unshift(action.payload);
+    },
     updateAppointmentStatus(
       state,
       action: PayloadAction<{ appointmentId: string; status: AppointmentItem["status"] }>,
@@ -53,5 +75,6 @@ const doctorSlice = createSlice({
   },
 });
 
-export const { updateAvailability, setDateFilter, updateAppointmentStatus } = doctorSlice.actions;
+export const { updateAvailability, setDateFilter, hydrateDoctorWorkspace, addAppointment, updateAppointmentStatus } =
+  doctorSlice.actions;
 export const doctorReducer = doctorSlice.reducer;

@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import { AppShell } from "../../app/layout/AppShell.tsx";
 import { AudioRecorder } from "../../components/ui/AudioRecorder.tsx";
@@ -7,96 +7,221 @@ import { PageHeader } from "../../components/ui/PageHeader.tsx";
 import { SummaryEditor } from "../../components/ui/SummaryEditor.tsx";
 import { apiClient } from "../../lib/api/client.ts";
 import { useAppDispatch, useAppSelector } from "../../lib/hooks/index.ts";
+import { downloadPharmacistCopy } from "./downloadPharmacistCopy.ts";
+import { loadDoctorWorkspace } from "./loadDoctorWorkspace.ts";
 import {
   addPrescription,
   applyProcessedConversation,
   completeOpRecording,
   markConversationSaved,
-  setCaseSummary,
+  setConsultationJob,
   setManualNotes,
   setProcessingState,
-  setTranscript,
+  setTranscriptVisibility,
   startOpRecording,
   updatePrescription,
 } from "./consultationSlice.ts";
-
-function buildDemoProcessing(transcript: string) {
-  return {
-    transcript,
-    caseSummary:
-      "Full OP conversation reviewed. Patient symptoms, clinical cues, and prescription instructions were summarized for CRM review.",
-    sourceLanguages: ["English", "Regional language input supported"],
-    prescriptionNarrative:
-      "Prescription details may be spoken in the doctor-patient conversation and are extracted into the editable card below.",
-    prescriptions: [
-      {
-        medicineName: "Metformin",
-        dosage: "500mg",
-        frequency: "Twice Daily",
-        timing: "After food",
-      },
-      {
-        medicineName: "Vitamin B12",
-        dosage: "1 tab",
-        frequency: "Once Daily",
-        timing: "Morning",
-      },
-    ],
-  };
-}
 
 export function LiveOPPage() {
   const dispatch = useAppDispatch();
   const patient = useAppSelector((state) =>
     state.patientSession.patients.find((item) => item.id === state.patientSession.selectedPatientId),
   );
+  const doctorProfile = useAppSelector((state) => state.doctor.profile);
+  const currentAppointment = useAppSelector((state) =>
+    state.doctor.appointments.find(
+      (item) =>
+        item.patientId === state.patientSession.selectedPatientId &&
+        ["Waiting", "In-Progress", "Scheduled"].includes(item.status),
+    ),
+  );
   const consultation = useAppSelector((state) => state.consultation);
   const auth = useAppSelector((state) => state.auth);
   const summarySectionRef = useRef<HTMLDivElement | null>(null);
+  const activeDoctorProfileId = auth.currentUser?.profile?.id ?? doctorProfile.id;
+  const activeDoctorName = auth.currentUser?.profile?.name ?? doctorProfile.name;
+  const activeDoctorDepartment = auth.currentUser?.profile?.department ?? doctorProfile.department;
 
-  const processTimeline = useMemo(
-    () => [
-      {
-        label: "Record full OP conversation",
-        status:
-          consultation.opRecordingStatus === "recorded"
-            ? "Done"
-            : consultation.opRecordingStatus === "recording"
-              ? "Recording"
-              : "Pending",
-      },
-      {
-        label: "Download audio / send for transcription",
-        status: consultation.audioDownloadUrl ? "Ready" : "Pending",
-      },
-      {
-        label: "Run transcript through Gemini",
-        status:
-          consultation.processStatus === "completed"
-            ? "Done"
-            : consultation.processStatus === "processing"
-              ? "Processing"
-              : "Pending",
-      },
-      {
-        label: "Review summary + prescription card",
-        status: consultation.caseSummary ? "Ready" : "Pending",
-      },
-      {
-        label: "Save consultation into CRM",
-        status: consultation.crmSaveStatus === "saved" ? "Ready" : "Pending",
-      },
-    ],
-    [consultation],
-  );
+  useEffect(() => {
+    if (auth.mode !== "server" || auth.role !== "Doctor" || !activeDoctorProfileId) {
+      return;
+    }
 
-  async function handleProcessTranscript() {
-    if (!consultation.transcript.trim()) {
+    void loadDoctorWorkspace(dispatch, {
+      doctorProfileId: activeDoctorProfileId,
+      selectedPatientId: patient?.id,
+    });
+  }, [activeDoctorProfileId, auth.mode, auth.role, dispatch, patient?.id]);
+
+  useEffect(() => {
+    if (!consultation.jobId || consultation.crmSaveStatus === "saved") {
+      return;
+    }
+
+    if (consultation.processStatus !== "processing") {
+      return;
+    }
+
+    const describeStatus = (status: string) => {
+      switch (status) {
+        case "AUDIO_READY":
+          return "Audio uploaded successfully. Preparing AI processing.";
+        case "TRANSCRIBING":
+          return "Sarvam AI is converting the Telugu consultation into English transcript.";
+        case "TRANSCRIPT_READY":
+          return "Transcript is ready. Generating structured consultation summary with Gemini.";
+        case "SUMMARIZING":
+          return "Gemini is generating the clinical summary and extracting medicines.";
+        default:
+          return consultation.processMessage;
+      }
+    };
+
+    const pollJob = async () => {
+      try {
+        const response = await apiClient.get(`/consultations/jobs/${consultation.jobId}`);
+        const job = response.data.job;
+
+        if (job.status === "COMPLETED" || job.status === "APPROVED") {
+          dispatch(
+            applyProcessedConversation({
+              jobId: job.jobId,
+              transcript: job.normalizedTranscript || job.rawTranscript || "",
+              caseSummary: job.caseSummary || "",
+              summarySections: {
+                presentingComplaints: job.summarySections?.presentingComplaints || "",
+                clinicalFindings: job.summarySections?.clinicalFindings || "",
+                assessmentAndAdvice: job.summarySections?.assessmentAndAdvice || "",
+                medicinesPrescribed: job.summarySections?.medicinesPrescribed || "",
+              },
+              sourceLanguages: job.sourceLanguages ?? [],
+              prescriptionNarrative: job.prescriptionNarrative ?? "",
+              prescriptions: job.prescriptions ?? [],
+            }),
+          );
+          if (job.status === "APPROVED") {
+            dispatch(markConversationSaved());
+          }
+          window.setTimeout(() => summarySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+          return;
+        }
+
+        if (job.status === "FAILED") {
+          dispatch(
+            setProcessingState({
+              status: "failed",
+              message: job.errorMessage || "Consultation processing failed. Please retry the recording.",
+            }),
+          );
+          return;
+        }
+
+        dispatch(
+          setProcessingState({
+            status: "processing",
+            message: describeStatus(job.status),
+          }),
+        );
+      } catch {
+        dispatch(
+          setProcessingState({
+            status: "failed",
+            message: "Unable to fetch consultation processing status from the server.",
+          }),
+        );
+      }
+    };
+
+    void pollJob();
+    const interval = window.setInterval(() => {
+      void pollJob();
+    }, 2500);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [
+    consultation.crmSaveStatus,
+    consultation.jobId,
+    consultation.processMessage,
+    consultation.processStatus,
+    dispatch,
+  ]);
+
+  async function handleRecordingComplete(payload: {
+    audioDownloadUrl: string;
+    audioFileName: string;
+    recordingSeconds: number;
+    audioBlob: Blob;
+    mediaMimeType: string;
+  }) {
+    dispatch(
+      completeOpRecording({
+        audioDownloadUrl: payload.audioDownloadUrl,
+        audioFileName: payload.audioFileName,
+        mediaMimeType: payload.mediaMimeType,
+        recordingSeconds: payload.recordingSeconds,
+      }),
+    );
+    dispatch(
+      setProcessingState({
+        status: "processing",
+        message: "Creating consultation job and uploading consultation audio for AI processing.",
+      }),
+    );
+
+    try {
+      const jobResponse = await apiClient.post("/consultations/jobs", {
+        appointmentId: currentAppointment?.id,
+        doctorProfileId: activeDoctorProfileId,
+        patientProfileId: patient?.id,
+        patientName: patient?.name,
+        doctorName: activeDoctorName,
+        department: activeDoctorDepartment,
+      });
+      const jobId = jobResponse.data.job.jobId as string;
+      dispatch(setConsultationJob(jobId));
+
+      const formData = new FormData();
+      formData.append("audio", payload.audioBlob, payload.audioFileName);
+
+      await apiClient.post(`/consultations/jobs/${jobId}/audio`, formData, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
+      dispatch(
+        setProcessingState({
+          status: "processing",
+          message: "Consultation audio uploaded. Automatic transcript and summary generation has started.",
+        }),
+      );
+    } catch {
       dispatch(
         setProcessingState({
           status: "failed",
-          message:
-            "Transcript is empty. Paste the full OSVI transcript or regional-language conversation transcript before processing.",
+          message: "Automatic consultation processing failed. Please retry the recording or audio upload.",
+        }),
+      );
+    }
+  }
+
+  async function handleApproveAndSave() {
+    if (!consultation.jobId) {
+      dispatch(
+        setProcessingState({
+          status: "failed",
+          message: "No consultation job is available to approve yet.",
+        }),
+      );
+      return;
+    }
+
+    if (!currentAppointment?.id || !patient?.id || !activeDoctorProfileId) {
+      dispatch(
+        setProcessingState({
+          status: "failed",
+          message: "Select a valid OP appointment before saving this consultation to CRM.",
         }),
       );
       return;
@@ -105,67 +230,51 @@ export function LiveOPPage() {
     dispatch(
       setProcessingState({
         status: "processing",
-        message:
-          "Processing the full doctor-patient conversation transcript with Gemini. Regional-language content is being normalized and prescriptions are being extracted.",
+        message: "Saving the doctor-approved consultation into the database.",
       }),
     );
 
     try {
-      const response = await apiClient.post("/consultations/process", {
-        transcript: consultation.transcript,
+      const response = await apiClient.post(`/consultations/jobs/${consultation.jobId}/approve`, {
+        approvalMode: "button",
+        prescriptions: consultation.prescriptionDrafts.filter((item) => item.medicineName.trim()),
+        manualNotes: consultation.manualNotes,
       });
 
-      dispatch(applyProcessedConversation(response.data.processed));
-      window.setTimeout(() => summarySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
-    } catch {
-      if (auth.mode === "demo") {
-        await new Promise((resolve) => window.setTimeout(resolve, 900));
-        dispatch(applyProcessedConversation(buildDemoProcessing(consultation.transcript)));
-        window.setTimeout(() => summarySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
-      } else {
-        dispatch(
-          setProcessingState({
-            status: "failed",
-            message: "Gemini processing failed. Please check transcript content or backend configuration.",
-          }),
-        );
+      if (response.data.persistedToMedicalHistory) {
+        dispatch(markConversationSaved());
+        await loadDoctorWorkspace(dispatch, {
+          doctorProfileId: activeDoctorProfileId,
+          selectedPatientId: patient.id,
+        });
+        downloadPharmacistCopy({
+          patient,
+          appointment: currentAppointment,
+          doctor: {
+            name: activeDoctorName,
+            department: activeDoctorDepartment,
+          },
+          summarySections: consultation.summarySections,
+          prescriptions: consultation.prescriptionDrafts.filter((item) => item.medicineName.trim()),
+        });
+        return;
       }
-    }
-  }
 
-  async function handleRecordingComplete(payload: {
-    audioDownloadUrl: string;
-    audioFileName: string;
-    recordingSeconds: number;
-    audioBlob: Blob;
-  }) {
-    dispatch(completeOpRecording(payload));
-    dispatch(
-      setProcessingState({
-        status: "processing",
-        message:
-          "Recording ended. Sending full OP audio for transcription, then generating conversation summary and prescription output.",
-      }),
-    );
-
-    try {
-      const formData = new FormData();
-      formData.append("audio", payload.audioBlob, payload.audioFileName);
-
-      const response = await apiClient.post("/consultations/process-audio", formData, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-      });
-
-      dispatch(applyProcessedConversation(response.data.processed));
-      window.setTimeout(() => summarySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
-    } catch {
       dispatch(
         setProcessingState({
           status: "failed",
-          message:
-            "Automatic transcription failed. You can still download the recording and paste the transcript manually for Gemini processing.",
+          message: "Consultation approval was accepted, but the OP was not finalized in medical history.",
+        }),
+      );
+    } catch (error) {
+      const message =
+        (error as { response?: { data?: { message?: string } } }).response?.data?.message ||
+        "Doctor approval could not be saved. Please try again.";
+
+      dispatch(
+        setProcessingState({
+          status: "failed",
+          message,
         }),
       );
     }
@@ -182,45 +291,22 @@ export function LiveOPPage() {
             <button
               type="button"
               onClick={() => {
-                dispatch(markConversationSaved());
+                void handleApproveAndSave();
               }}
+              disabled={consultation.processStatus !== "completed" && consultation.crmSaveStatus !== "saved"}
               className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white"
             >
-              Save to CRM
+              {consultation.crmSaveStatus === "saved" ? "Saved to CRM" : "Save to CRM"}
             </button>
           </div>
         }
       />
 
       <div className="grid gap-6">
-        <Card title="Conversation Workflow" subtitle="This is the intended full recording to CRM pipeline for the OP session.">
-          <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <p className="text-sm font-semibold text-slate-900">Current process state</p>
-              <p className="mt-2 text-sm text-slate-500">{consultation.processMessage}</p>
-              <div className="mt-4 grid gap-3">
-                {processTimeline.map((step) => (
-                  <div key={step.label} className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3">
-                    <span className="text-sm font-medium text-slate-700">{step.label}</span>
-                    <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500">
-                      {step.status}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
-              <p className="text-sm font-semibold text-blue-800">Regional language handling</p>
-              <p className="mt-2 text-sm text-blue-700">
-                The transcript-processing prompt now supports mixed English and regional languages.
-                Prescription instructions spoken in Telugu, Hindi, Tamil, Kannada, Malayalam, Marathi,
-                Bengali, or code-switched conversation should still be summarized into CRM-friendly output.
-              </p>
-            </div>
-          </div>
-        </Card>
-
-        <Card title="Patient Context" subtitle="Upper section with Four-Key summary and recent history cues.">
+        <Card
+          title="Patient Case History"
+          subtitle="Quick patient context to review before starting or summarizing the consultation."
+        >
           <div className="grid gap-4 lg:grid-cols-4">
             {[
               { label: "Conditions", value: patient?.fourKeySummary.chronicConditions },
@@ -236,7 +322,10 @@ export function LiveOPPage() {
           </div>
         </Card>
 
-        <Card title="Voice + Text Workspace" subtitle="Middle section for record, transcript review, and AI-assisted summary editing.">
+        <Card
+          title="Consultation Recording & Summary"
+          subtitle="Record the OP conversation, review the transcript, and generate a clean clinical summary."
+        >
           <div className="space-y-6">
             <AudioRecorder
               onRecordingStart={() => dispatch(startOpRecording())}
@@ -245,34 +334,25 @@ export function LiveOPPage() {
               }}
               savedAudioUrl={consultation.audioDownloadUrl}
               savedAudioFileName={consultation.audioFileName}
+              savedMediaMimeType={consultation.mediaMimeType}
             />
             <div className="rounded-2xl border border-slate-200 bg-white p-4">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
-                  <p className="text-sm font-semibold text-slate-900">Transcript Processing</p>
+                  <p className="text-sm font-semibold text-slate-900">Automatic AI Processing</p>
                   <p className="text-sm text-slate-500">
-                    Once recording stops, the app will try to transcribe and process automatically.
-                    If needed, you can still paste the full transcript here and re-run Gemini processing.
+                    {consultation.processMessage}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void handleProcessTranscript();
-                  }}
-                  className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white"
-                >
-                  Reprocess Transcript
-                </button>
               </div>
             </div>
             <div ref={summarySectionRef}>
               <SummaryEditor
                 transcript={consultation.transcript}
-                caseSummary={consultation.caseSummary}
+                summarySections={consultation.summarySections}
                 prescriptions={consultation.prescriptionDrafts}
-                onTranscriptChange={(value) => dispatch(setTranscript(value))}
-                onSummaryChange={(value) => dispatch(setCaseSummary(value))}
+                showTranscript={consultation.showTranscript}
+                onToggleTranscript={() => dispatch(setTranscriptVisibility(!consultation.showTranscript))}
                 onPrescriptionChange={(index, field, value) =>
                   dispatch(updatePrescription({ index, field, value }))
                 }

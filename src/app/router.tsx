@@ -25,6 +25,10 @@ function RoleHomeRedirect() {
     return <Navigate to="/admin" replace />;
   }
 
+  if (role === "Patient") {
+    return <Navigate to="/patient" replace />;
+  }
+
   return <Navigate to="/login" replace />;
 }
 
@@ -45,6 +49,10 @@ export function AppRouter() {
 
         <Route element={<ProtectedRoute allowedRoles={["Pharmacist"]} />}>
           <Route path="/pharmacy" element={<PharmacyPortalPage />} />
+        </Route>
+
+        <Route element={<ProtectedRoute allowedRoles={["Patient"]} />}>
+          <Route path="/patient" element={<PatientProfilePage />} />
         </Route>
 
         <Route element={<ProtectedRoute allowedRoles={["Admin"]} />}>
